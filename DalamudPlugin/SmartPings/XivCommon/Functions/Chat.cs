@@ -1,93 +1,23 @@
 ﻿// Adapted from https://github.com/NightmareXIV/ECommons/blob/master/ECommons/Automation/Chat.cs
-
-/*
-https://git.annaclemens.io/ascclemens/XivCommon/src/branch/main/XivCommon/Functions/Chat.cs 
-MIT License
-Copyright (c) 2021 Anna Clemens
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-*/
-using Dalamud.Game;
+// 0a2f918
+using Dalamud.Memory;
 using Dalamud.Plugin.Services;
-using FFXIVClientStructs.FFXIV.Client.System.Memory;
 using FFXIVClientStructs.FFXIV.Client.System.String;
+using FFXIVClientStructs.FFXIV.Client.UI;
 using Lumina.Excel.Sheets;
 using SmartPings;
 using System;
-using System.Runtime.InteropServices;
 using System.Text;
-using Framework = FFXIVClientStructs.FFXIV.Client.System.Framework.Framework;
 namespace ECommons.Automation;
 #nullable disable
 
 /// <summary>
 /// A class containing chat functionality
 /// </summary>
-public unsafe class Chat
+// from: https://github.com/Infiziert90/ChatTwo/blob/5b58513a5226a2d3b40aca96be4f51c779fab363/ChatTwo/GameFunctions/ChatBox.cs#L9
+public unsafe class Chat(DalamudServices dalamud)
 {
-    public static readonly string SendChatSignature = "48 89 5C 24 ?? 48 89 74 24 ?? 57 48 83 EC 20 48 8B F2 48 8B F9 45 84 C9";
-    public static readonly string SanitiseStringSignature = "48 89 5C 24 ?? 55 56 57 41 54 41 55 41 56 41 57 48 8D 6C 24 ?? 48 81 EC ?? ?? ?? ?? 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 45 70 4D 8B F8 4C 89 44 24 ?? 4C 8B 05 ?? ?? ?? ?? 44 8B E2";
-
-    private delegate void ProcessChatBoxDelegate(IntPtr uiModule, IntPtr message, IntPtr unused, byte a4);
-    private ProcessChatBoxDelegate ProcessChatBox { get; }
-
-    private delegate void SanitizeStringDelegate(Utf8String* stringPtr, int a2, nint a3);
-    private SanitizeStringDelegate SanitizeString { get; }
-
-    [StructLayout(LayoutKind.Explicit)]
-    private readonly struct ChatPayload : IDisposable
-    {
-        [FieldOffset(0)]
-        private readonly IntPtr textPtr;
-        [FieldOffset(16)]
-        private readonly ulong textLen;
-        [FieldOffset(8)]
-        private readonly ulong unk1;
-        [FieldOffset(24)]
-        private readonly ulong unk2;
-        internal ChatPayload(byte[] stringBytes)
-        {
-            textPtr = Marshal.AllocHGlobal(stringBytes.Length + 30);
-            Marshal.Copy(stringBytes, 0, textPtr, stringBytes.Length);
-            Marshal.WriteByte(textPtr + stringBytes.Length, 0);
-            textLen = (ulong)(stringBytes.Length + 1);
-            unk1 = 64;
-            unk2 = 0;
-        }
-        public void Dispose()
-        {
-            Marshal.FreeHGlobal(textPtr);
-        }
-    }
-
-    private readonly IDataManager dataManager;
-
-    public Chat(DalamudServices dalamud)
-    {
-        this.dataManager = dalamud.DataManager;
-
-        if(dalamud.SigScanner.TryScanText(SendChatSignature, out var processChatBoxPtr))
-        {
-            ProcessChatBox = Marshal.GetDelegateForFunctionPointer<ProcessChatBoxDelegate>(processChatBoxPtr);
-        }
-        if(dalamud.SigScanner.TryScanText(SanitiseStringSignature, out var sanitisePtr))
-        {
-            SanitizeString = Marshal.GetDelegateForFunctionPointer<SanitizeStringDelegate>(sanitisePtr);
-        }
-    }
+    private readonly IDataManager dataManager = dalamud.DataManager;
 
     /// <summary>
     /// <para>
@@ -102,20 +32,13 @@ public unsafe class Chat
     /// </summary>
     /// <param name="message">Message to send</param>
     /// <exception cref="InvalidOperationException">If the signature for this function could not be found</exception>
-    [Obsolete("Use safe message sending")]
-    public unsafe void SendMessageUnsafe(byte[] message)
+    public void SendMessageUnsafe(byte[] message)
     {
-        if(ProcessChatBox == null)
-        {
-            throw new InvalidOperationException("Could not find signature for chat sending");
-        }
-        var uiModule = (IntPtr)Framework.Instance()->GetUIModule();
-        using var payload = new ChatPayload(message);
-        var mem1 = Marshal.AllocHGlobal(400);
-        Marshal.StructureToPtr(payload, mem1, false);
-        ProcessChatBox(uiModule, mem1, IntPtr.Zero, 0);
-        Marshal.FreeHGlobal(mem1);
+        var mes = Utf8String.FromSequence(message.NullTerminate());
+        UIModule.Instance()->ProcessChatBoxEntry(mes);
+        mes->Dtor(true);
     }
+
     /// <summary>
     /// <para>
     /// Send a given message to the chat box. <b>This can send chat to the server.</b>
@@ -133,28 +56,39 @@ public unsafe class Chat
     {
         var bytes = Encoding.UTF8.GetBytes(message);
         if(bytes.Length == 0)
-        {
             throw new ArgumentException("message is empty", nameof(message));
-        }
+
         if(bytes.Length > 500)
-        {
             throw new ArgumentException("message is longer than 500 bytes", nameof(message));
-        }
+
         if(message.Length != SanitiseText(message).Length)
-        {
             throw new ArgumentException("message contained invalid characters", nameof(message));
-        }
-        if(message.Contains('\n'))
-        {
-            throw new ArgumentException("message can't contain multiple lines", nameof(message));
-        }
-        if(message.Contains('\r'))
-        {
-            throw new ArgumentException("message can't contain carriage return", nameof(message));
-        }
-#pragma warning disable CS0618 // Type or member is obsolete
+
         SendMessageUnsafe(bytes);
-#pragma warning restore CS0618 // Type or member is obsolete
+    }
+
+    /// <summary>
+    /// <para>
+    /// Sanitises a string by removing any invalid input.
+    /// </para>
+    /// <para>
+    /// The result of this method is safe to use with
+    /// <see cref="SendMessage"/>, provided that it is not empty or too
+    /// long.
+    /// </para>
+    /// </summary>
+    /// <param name="text">text to sanitise</param>
+    /// <returns>sanitised text</returns>
+    /// <exception cref="InvalidOperationException">If the signature for this function could not be found</exception>
+    public string SanitiseText(string text)
+    {
+        var uText = Utf8String.FromString(text);
+
+        uText->SanitizeString((AllowedEntities)0x27F);
+        var sanitised = uText->ToString();
+        uText->Dtor(true);
+
+        return sanitised;
     }
 
     /// <summary>
@@ -186,30 +120,14 @@ public unsafe class Chat
         ExecuteCommand($"/action \"{dataManager.GetExcelSheet<Lumina.Excel.Sheets.Action>().GetRowOrDefault(actionId)?.Name}\"");
     }
 
-    /// <summary>
-    /// <para>
-    /// Sanitises a string by removing any invalid input.
-    /// </para>
-    /// <para>
-    /// The result of this method is safe to use with
-    /// <see cref="SendMessage"/>, provided that it is not empty or too
-    /// long.
-    /// </para>
-    /// </summary>
-    /// <param name="text">text to sanitise</param>
-    /// <returns>sanitised text</returns>
-    /// <exception cref="InvalidOperationException">If the signature for this function could not be found</exception>
-    public unsafe string SanitiseText(string text)
-    {
-        if(SanitizeString == null)
-        {
-            throw new InvalidOperationException("Could not find signature for chat sanitisation");
-        }
-        var uText = Utf8String.FromString(text);
-        SanitizeString(uText, 0x27F, IntPtr.Zero);
-        var sanitised = uText->ToString();
-        uText->Dtor();
-        IMemorySpace.Free(uText);
-        return sanitised;
-    }
+    //[Obsolete("Use Chat.<MethodName> directly instead of Chat.Instance.<MethodName>")]
+    //public static class Instance
+    //{
+    //    public static void ExecuteCommand(string message) => Chat.ExecuteCommand(message);
+    //    public static void SendMessageUnsafe(byte[] message) => Chat.SendMessageUnsafe(message);
+    //    public static void SendMessage(string message) => Chat.SendMessage(message);
+    //    public static void ExecuteGeneralAction(uint generalActionId) => Chat.ExecuteGeneralAction(generalActionId);
+    //    public static void ExecuteAction(uint actionId) => Chat.ExecuteAction(actionId);
+    //    public static string SanitiseText(string text) => Chat.SanitiseText(text);
+    //}
 }
